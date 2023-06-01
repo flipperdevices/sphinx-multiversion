@@ -10,7 +10,14 @@ import tempfile
 
 GitRef = collections.namedtuple(
     "VersionRef",
-    ["name", "commit", "source", "is_remote", "refname", "creatordate",],
+    [
+        "name",
+        "commit",
+        "source",
+        "is_remote",
+        "refname",
+        "creatordate",
+    ],
 )
 
 logger = logging.getLogger(__name__)
@@ -21,9 +28,40 @@ def get_toplevel_path(cwd=None):
         "git",
         "rev-parse",
         "--show-toplevel",
+        "--show-superproject-working-tree",
     )
     output = subprocess.check_output(cmd, cwd=cwd).decode()
-    return output.rstrip("\n")
+    # If this is a git submodule of a super project then we'll have two lines
+    # of output, otherwise one. Since the superproject flag is second in the
+    # command above the superproject will always be the last line if present.
+    return output.split()[-1]
+
+
+def get_current_submodule_commit(sourcedir, cwd=None):
+    cmd = (
+        "git",
+        "ls-tree",
+        "HEAD",
+        str(sourcedir),
+    )
+    output = subprocess.check_output(cmd, cwd=cwd).decode()
+    return output.split()[2]
+
+
+def submodule_exists(gitroot, refname, sourcedir, current_submodule_commit):
+    cmd = (
+        "git",
+        "ls-tree",
+        refname,
+        sourcedir,
+    )
+
+    output = subprocess.check_output(cmd, cwd=gitroot).decode()
+
+    if not output:
+        return False
+
+    return output.split()[2] == current_submodule_commit
 
 
 def get_all_refs(gitroot):
@@ -63,7 +101,12 @@ def get_all_refs(gitroot):
 
 
 def get_refs(
-    gitroot, tag_whitelist, branch_whitelist, remote_whitelist, files=()
+    gitroot,
+    tag_whitelist,
+    branch_whitelist,
+    remote_whitelist,
+    current_submodule_commit,
+    sourcedir,
 ):
     for ref in get_all_refs(gitroot):
         if ref.source == "tags":
@@ -112,17 +155,15 @@ def get_refs(
             )
             continue
 
-        missing_files = [
-            filename
-            for filename in files
-            if filename != "."
-            and not file_exists(gitroot, ref.refname, filename)
-        ]
-        if missing_files:
+        if not submodule_exists(
+            gitroot=gitroot,
+            refname=ref.refname,
+            sourcedir=sourcedir,
+            current_submodule_commit=current_submodule_commit,
+        ):
             logger.debug(
-                "Skipping '%s' because it lacks required files: %r",
-                ref.refname,
-                missing_files,
+                f"Skipping {ref.refname} because there are no the {sourcedir} "
+                f"with the commit {current_submodule_commit}"
             )
             continue
 
@@ -146,7 +187,9 @@ def file_exists(gitroot, refname, filename):
     return proc.returncode == 0
 
 
-def copy_tree(gitroot, src, dst, reference, sourcepath="."):
+def copy_tree(
+    gitroot, dst, reference, sourcedir, submodule_tar_path, sourcepath="."
+):
     with tempfile.SpooledTemporaryFile() as fp:
         cmd = (
             "git",
@@ -161,3 +204,19 @@ def copy_tree(gitroot, src, dst, reference, sourcepath="."):
         fp.seek(0)
         with tarfile.TarFile(fileobj=fp) as tarfp:
             tarfp.extractall(dst)
+
+        with tarfile.open(submodule_tar_path, "r") as tarfp:
+            tarfp.extractall(dst + f"/{sourcedir}")
+
+
+def copy_submodule(submodule_path, output_path, submodule_commit):
+    cmd = (
+        "git",
+        "archive",
+        "--format",
+        "tar",
+        "-o",
+        output_path,
+        submodule_commit,
+    )
+    subprocess.run(cmd, cwd=submodule_path)

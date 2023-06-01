@@ -34,7 +34,8 @@ def load_sphinx_config_worker(q, confpath, confoverrides, add_defaults):
     try:
         with working_dir(confpath):
             current_config = sphinx_config.Config.read(
-                confpath, confoverrides,
+                confpath,
+                confoverrides,
             )
 
         if add_defaults:
@@ -159,11 +160,21 @@ def main(argv=None):
         action="store_true",
         help="dump generated metadata and exit",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        dest="debug",
+        help="debug mode",
+    )
     args, argv = parser.parse_known_args(argv)
     if args.noconfig:
         return 1
 
     logger = logging.getLogger(__name__)
+
+    if args.debug:
+        logging.basicConfig(level="DEBUG")
 
     sourcedir_absolute = os.path.abspath(args.sourcedir)
     confdir_absolute = (
@@ -200,7 +211,10 @@ def main(argv=None):
     else:
         confdir = sourcedir
     logger.debug("Conf dir (relative to git toplevel path): %s", str(confdir))
-    conffile = os.path.join(confdir, "conf.py")
+
+    current_submodule_commit = git.get_current_submodule_commit(
+        sourcedir=sourcedir, cwd=gitroot
+    )
 
     # Get git references
     gitrefs = git.get_refs(
@@ -208,7 +222,8 @@ def main(argv=None):
         config.smv_tag_whitelist,
         config.smv_branch_whitelist,
         config.smv_remote_whitelist,
-        files=(sourcedir, conffile),
+        current_submodule_commit=current_submodule_commit,
+        sourcedir=sourcedir,
     )
 
     # Order git refs
@@ -217,17 +232,34 @@ def main(argv=None):
     else:
         gitrefs = sorted(gitrefs, key=lambda x: (x.is_remote, *x))
 
-    logger = logging.getLogger(__name__)
+    logger.debug("Absolute path to . : %s", os.path.abspath("."))
+    # logger.debug("Folders in . : %s", os.listdir("./documentation/"))
 
     with tempfile.TemporaryDirectory() as tmp:
         # Generate Metadata
         metadata = {}
         outputdirs = set()
+
+        submodule_tar_path = os.path.join(tmp, "submodule.tar")
+        submodule_path = os.path.join(gitroot, sourcedir)
+
+        git.copy_submodule(
+            submodule_path=submodule_path,
+            output_path=submodule_tar_path,
+            submodule_commit=current_submodule_commit,
+        )
+
         for gitref in gitrefs:
             # Clone Git repo
             repopath = os.path.join(tmp, gitref.commit)
             try:
-                git.copy_tree(str(gitroot), gitroot.as_uri(), repopath, gitref)
+                git.copy_tree(
+                    str(gitroot),
+                    repopath,
+                    gitref,
+                    sourcedir=sourcedir,
+                    submodule_tar_path=submodule_tar_path,
+                )
             except (OSError, subprocess.CalledProcessError):
                 logger.error(
                     "Failed to copy git tree for %s to %s",
@@ -235,6 +267,10 @@ def main(argv=None):
                     repopath,
                 )
                 continue
+
+            # List files
+            # logger.debug("Files in %s : %s", repopath, os.listdir(repopath + "/documentation/doxygen/html/"))
+            # logger.debug("Absolute path to repopath : %s", os.path.abspath(repopath))
 
             # Find config
             confpath = os.path.join(repopath, confdir)
@@ -250,7 +286,8 @@ def main(argv=None):
 
             # Ensure that there are not duplicate output dirs
             outputdir = config.smv_outputdir_format.format(
-                ref=gitref, config=current_config,
+                ref=gitref,
+                config=current_config,
             )
             if outputdir in outputdirs:
                 logger.warning(
@@ -300,6 +337,9 @@ def main(argv=None):
         metadata_path = os.path.abspath(os.path.join(tmp, "versions.json"))
         with open(metadata_path, mode="w") as fp:
             json.dump(metadata, fp, indent=2)
+
+        # List the files in documentation/doxygen/html
+        # logger.debug("Files in %s : %s", os.path.abspath("./documentation/doxygen/html/"), os.listdir("./documentation/doxygen/html/"))
 
         # Run Sphinx
         argv.extend(["-D", "smv_metadata_path={}".format(metadata_path)])
