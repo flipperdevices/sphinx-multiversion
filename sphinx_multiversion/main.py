@@ -222,7 +222,6 @@ def main(argv=None):
         config.smv_tag_whitelist,
         config.smv_branch_whitelist,
         config.smv_remote_whitelist,
-        current_submodule_commit=current_submodule_commit,
         sourcedir=sourcedir,
     )
 
@@ -240,14 +239,7 @@ def main(argv=None):
         metadata = {}
         outputdirs = set()
 
-        submodule_tar_path = os.path.join(tmp, "submodule.tar")
         submodule_path = os.path.join(gitroot, sourcedir)
-
-        git.copy_submodule(
-            submodule_path=submodule_path,
-            output_path=submodule_tar_path,
-            submodule_commit=current_submodule_commit,
-        )
 
         for gitref in gitrefs:
             # Clone Git repo
@@ -258,7 +250,7 @@ def main(argv=None):
                     repopath,
                     gitref,
                     sourcedir=sourcedir,
-                    submodule_tar_path=submodule_tar_path,
+                    submodule_path=submodule_path,
                 )
             except (OSError, subprocess.CalledProcessError):
                 logger.error(

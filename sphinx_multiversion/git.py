@@ -15,6 +15,7 @@ GitRef = collections.namedtuple(
         "commit",
         "source",
         "is_remote",
+        "submodule_commit",
         "refname",
         "creatordate",
     ],
@@ -45,6 +46,22 @@ def get_current_submodule_commit(sourcedir, cwd=None):
         str(sourcedir),
     )
     output = subprocess.check_output(cmd, cwd=cwd).decode()
+    return output.split()[2]
+
+
+def get_submodule_commit(gitroot, refname, sourcedir):
+    cmd = (
+        "git",
+        "ls-tree",
+        refname,
+        sourcedir,
+    )
+
+    output = subprocess.check_output(cmd, cwd=gitroot).decode()
+
+    if not output:
+        return None
+
     return output.split()[2]
 
 
@@ -97,7 +114,7 @@ def get_all_refs(gitroot):
         if source.startswith("remotes/"):
             is_remote = True
 
-        yield GitRef(name, commit, source, is_remote, refname, creatordate)
+        yield GitRef(name, commit, source, is_remote, None, refname, creatordate)
 
 
 def get_refs(
@@ -105,7 +122,6 @@ def get_refs(
     tag_whitelist,
     branch_whitelist,
     remote_whitelist,
-    current_submodule_commit,
     sourcedir,
 ):
     for ref in get_all_refs(gitroot):
@@ -155,16 +171,13 @@ def get_refs(
             )
             continue
 
-        if not submodule_exists(
-            gitroot=gitroot,
-            refname=ref.refname,
-            sourcedir=sourcedir,
-            current_submodule_commit=current_submodule_commit,
-        ):
+        submodule_commit = get_submodule_commit(gitroot, ref.refname, sourcedir)
+        # Override the ref with the submodule commit
+        ref = GitRef(ref.name, ref.commit, ref.source, ref.is_remote, submodule_commit, ref.refname, ref.creatordate)
+
+        if not ref.submodule_commit:
             logger.debug(
-                f"Skipping {ref.refname} because there are no the {sourcedir} "
-                f"with the commit {current_submodule_commit}"
-            )
+                f"Skipping {ref.refname} because there are no the {sourcedir} ")
             continue
 
         yield ref
@@ -188,9 +201,9 @@ def file_exists(gitroot, refname, filename):
 
 
 def copy_tree(
-    gitroot, dst, reference, sourcedir, submodule_tar_path, sourcepath="."
+    gitroot, dst, reference, sourcedir, submodule_path, sourcepath="."
 ):
-    with tempfile.SpooledTemporaryFile() as fp:
+    with tempfile.SpooledTemporaryFile() as fp, tempfile.SpooledTemporaryFile() as fp_submodule:
         cmd = (
             "git",
             "archive",
@@ -205,8 +218,20 @@ def copy_tree(
         with tarfile.TarFile(fileobj=fp) as tarfp:
             tarfp.extractall(dst)
 
-        with tarfile.open(submodule_tar_path, "r") as tarfp:
-            tarfp.extractall(dst + f"/{sourcedir}")
+        cmd = (
+            "git",
+            "archive",
+            "--format",
+            "tar",
+            reference.submodule_commit,
+            "--",
+            sourcepath,
+        )
+
+        subprocess.check_call(cmd, cwd=submodule_path, stdout=fp_submodule)
+        fp_submodule.seek(0)
+        with tarfile.TarFile(fileobj=fp_submodule) as tarfp:
+            tarfp.extractall(os.path.join(dst, sourcedir))
 
 
 def copy_submodule(submodule_path, output_path, submodule_commit):
